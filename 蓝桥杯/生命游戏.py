@@ -121,5 +121,6 @@ def lifeGame(times):
 
     print('第%d代：\n'%time, arr)
     print('还有{0}个细胞存活'.format(np.sum(arr)))
+    
 if __name__ == '__main__':
     lifeGame(10)
