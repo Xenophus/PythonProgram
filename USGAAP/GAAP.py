@@ -2,12 +2,11 @@
 # python 3.7.0
 
 '''
-符合符合美国现行会计准则的收入计算模型的一些配置
+符合美国现行会计准则的收入计算模型的一些配置
 包括环境配置和业务配置
 '''
 
 import os
-import sys
 import csv
 import xlrd
 import time
@@ -18,10 +17,7 @@ from platform import system
 from numpy import pmt, irr
 from codecs import open as op
 from calendar import monthrange
-from xlutils.copy import copy
-from PyQt5.QtGui import *
-from PyQt5.QtCore import *
-from PyQt5.QtWidgets import *
+
 
 ###############################################系统环境参数##############################################################
 """程序名称"""
@@ -53,10 +49,10 @@ BEGIN = '2014/12/01'
 
 #程序参数配置
 config = {
-    'PROCESS': 1,                            #启动进程数量
+    'PROCESS': 4,                            #启动进程数量
     'HEADER': 1,                             #输出数据包含表头：1 不包含：0
     'MONTH': 0,                              #输出还款计划表 按月：1 按日：0
-    'OUTPUT_SCHEDULE': 1,                    #输出还款计划表：1 不输出：0
+    'OUTPUT_SCHEDULE': 0,                    #输出还款计划表：1 不输出：0
     'OUTPUT_REPORT': 1,                      #输出收入报表：1 不输出：0
     'COMBINE': 1,                            #是否合并输出结果：1 不输出：0
     'UPLOAD': 0,                             #是否上传数据：1 不上传：0
@@ -434,8 +430,17 @@ class Math(object):
 class Revenue(Math):
     """贷款收入模型类,继承数学模型类中的运算函数"""
     def __init__(self, config, param, period=None, future_loss=None, changeList=None, ipcr=None):
-
-        """继承父类属性"""
+        '''
+        传入参数
+            config: 全局变量
+            param: 某一笔贷款数据，例如: ['RL20151210000075', '廊坊银行', 'RL20150105000002', 36.0, 100000.0, 2015/12/11, 9.0,
+                                        3.0, 0.0, 0.0, 0.59, '2018/12/11', '', '', 0.09210366435822859, 0.06973581093255772, 0.02505]
+            period: 计算区间, 例如：{'2014-12-2018-12': {'start': '2014/12/01', 'end': '2018/12/31'}}
+            future_loss: DataEngine类中读取config配置表第二页得到的参数
+            changeList: DataEngine类中读取config配置表第一页和第五页组合得到的参数, 业务参数及其修改历史
+            ipcr: DataEngine类中读取config配置表第三页得到的参数
+        '''
+        '''继承父类属性'''
         super(Revenue, self).__init__()                                         #继承父类的构造方法，如数值精度
 
         self.future_loss = future_loss
@@ -454,15 +459,24 @@ class Revenue(Math):
         self.p[interest_rate] = float(param[6]) / 100                                       #折现率
         self.p[service_rate] = float(param[7]) / 100                                        #服务费率
 
-        if str(param[9]) not in ['0', '']:
+        #判断浮动管理费分母是否为0
+        if str(param[9]) not in ['0.0', '0', '']:
+            #如果不为0，则管理费率1 = 浮动管理费分子 / 分母
             self.p[management_rate1] = float(param[8]) / float(param[9])                    #管理费1
         else:
+            #如果为0，则管理费率1为0
             self.p[management_rate1] = 0
         self.p[management_rate] = self.p[management_rate2] = float(param[10]) / 100         #管理费率2，显示出来
 
-        self.p[guarantee_ratio] = round(float(param[-2]), 4)                                #担保比例
+        #判断机构id是否是太保模式，若机构是太保模式，担保比例使用guarantee_ratio_taibao
+        if self.get_is_include(self.p[lineid], config['FILTER1']):
+            self.p[guarantee_ratio] = round(float(param[-2]), 6)                                #担保比例
+        else:
+            self.p[guarantee_ratio] = round(float(param[-3]), 6)
+
         self.p[margin_ratio] = float(param[-1])                                             #全周期利润率
 
+        #loss_ratio = guarantee_ratio - margin
         self.p[loss_ratio] = self.subtract_value(self.p[guarantee_ratio], self.p[margin_ratio])
 
         self.p[discount_rate] = self.get_irr_value(self.p[principal], self.p[service_rate], self.p[management_rate2],
@@ -723,6 +737,7 @@ class Revenue(Math):
         h3 记录创建人和时间
     '''
     def output_schedule_list(self, writer):
+        #h1、h2、h3为还款计划表的表头
         h1 = [putout_no, putout_date, sortno, loan_term, date, start, end,                  # 必要字段
               interest_rate, guarantee_ratio, margin_ratio, service_rate, management_rate,  # 导入参数
               discount_rate, upfront_cost, on_going_cost, total_guarantee]                  # 中间计算生成参数
@@ -1098,31 +1113,36 @@ class Revenue(Math):
             self.report[period][contract_assets_day1] = self.get_time_point_value(self.p[putout_date], contract_assets_early_repay)
 
             self.report[period][month_of_loan_end] = self.get_month_of_loan(self.report[period][end], self.p[putout_date])
-            #通过month_of_loan匹配ipcr值
+            # 通过month_of_loan匹配ipcr值
             if self.report[period][month_of_loan_end] in self.ipcr.keys():
                 self.report[period][implied_price_concession_ratio_end] = self.ipcr[self.report[period][month_of_loan_end]]
             else:
                 self.report[period][implied_price_concession_ratio_end] = 0
-
+            # reduction_of_interest_guarantee_accumulate = loss_ratio * premium_receivable_day1 * implied_price_concession_ratio_end
             self.report[period][reduction_of_interest_guarantee_accumulate] = self.get_reduction_of_interest_guarantee(
                                                                                   self.p[loss_ratio],
                                                                                   self.report[period][premium_receivable_day1],
                                                                                   self.report[period][implied_price_concession_ratio_end])
+            # reduction_of_interest_matching_accumulate = loss_ratio * contract_assets_day1 * implied_price_concession_ratio_end
             self.report[period][reduction_of_interest_matching_accumulate] = self.get_reduction_of_interest_matching(
                                                                                   self.p[loss_ratio],
                                                                                   self.report[period][contract_assets_day1],
                                                                                   self.report[period][implied_price_concession_ratio_end])
-
+            # start - putout_date
             self.report[period][month_of_loan_start] = self.get_month_of_loan(self.report[period][start],
                                                                               self.p[putout_date])
+            #取与month_of_loan_start对应的ipcr值
             if self.report[period][month_of_loan_start] in self.ipcr.keys():
                 self.report[period][implied_price_concession_ratio_start] = self.ipcr[self.report[period][month_of_loan_start]]
             else:
                 self.report[period][implied_price_concession_ratio_start] = 0
 
+            #reduction_of_interest_guarantee_current = loss_ratio * premium_receivable_day1 * （implied_price_concession_ratio_end - implied_price_concession_ratio_start）
             self.report[period][reduction_of_interest_guarantee_current] = self.get_reduction_of_interest_guarantee(
                         self.p[loss_ratio], self.report[period][premium_receivable_day1],
                         self.report[period][implied_price_concession_ratio_end]-self.report[period][implied_price_concession_ratio_start])
+
+            #reduction_of_interest_matching_current = loss_ratio * contract_assets_day1 * （implied_price_concession_ratio_end - implied_price_concession_ratio_start）
             self.report[period][reduction_of_interest_matching_current] = self.get_reduction_of_interest_matching(
                         self.p[loss_ratio], self.report[period][contract_assets_day1],
                         self.report[period][implied_price_concession_ratio_end]-self.report[period][implied_price_concession_ratio_start])
@@ -1210,15 +1230,27 @@ class Revenue(Math):
                 self.report[period][unadjusted][pre_guarantee_loss] = self.multiply_value(self.p[loss_ratio] / self.p[guarantee_ratio],
                                                                                          (-self.report[period][unadjusted][pre_guarantee]))
 
-                #对个别的合作机构，进行担保相关科目调整前和调整数的归零调整
+                #对于太保模式的机构，进行担保相关科目调整前和调整数的归零调整
                 if self.get_is_include(self.p[lineid], config['FILTER1']):
 
                     for account in [premium_receivable_principal, cash_for_guarantee, guarantee,
                                     interest_adjust_for_guarantee, guarantee_liability_460, impairment_loss1,
                                     pre_impairment_loss1, pre_cash_for_guarantee,
                                     pre_guarantee, pre_interest_adjust_for_guarantee]:
-                        self.report[period][unadjusted][account] = 0
-                        self.report[period][adjust_num][account] = 0
+                        if account in [premium_receivable_principal, cash_for_guarantee, guarantee_liability_460,
+                                       pre_cash_for_guarantee, pre_guarantee]:
+                            try:
+                                self.report[period][unadjusted][account] = self.report[period][unadjusted][account] * 0
+                                self.report[period][adjust_num][account] = self.report[period][adjust_num][account] * 0
+                            except:
+                                self.report[period][unadjusted][account] = 0
+                                self.report[period][adjust_num][account] = 0
+                        elif account in [interest_adjust_for_guarantee, pre_interest_adjust_for_guarantee]:
+                            self.report[period][unadjusted][account] = self.report[period][unadjusted][account] * 0.65
+                        else:
+                            self.report[period][unadjusted][account] = 0
+                            self.report[period][adjust_num][account] = 0
+
                 #调整后数据初始化
                 total_account = [premium_receivable_principal, cash_for_guarantee, guarantee,
                                  interest_adjust_for_guarantee,
@@ -1276,48 +1308,57 @@ class Revenue(Math):
 
                 #更改特别合作机构的输出值
                 if self.get_is_include(self.p[lineid], config['FILTER1']):
+                    # 调整后的字段归零
                     for account in [fair_value_guarantees, pre_fair_value_guarantees, charge_income, pre_charge_income]:
                         self.report[period][adjusted][account] = 0
 
+                    # 调整后的字段乘以比例 TPY_Model_ratio2
                     for st in [cash_for_post_origination, post_origination, pre_cash_for_post_origination, pre_post_origination,
                                contract_assets_early_repay, cash_for_matching, match_early_repay, pre_cash_for_matching,
                                pre_match_early_repay, charge_income, pre_fair_value_guarantees, pre_charge_income]:
                         self.report[period][adjusted][st] = self.report[period][adjusted][st] * self.p[TPY_Model_ratio2]
 
+                    # 乘以比例 TPY_Model_ratio1
                     self.report[period][reduction_of_interest_matching_accumulate] = self.report[period][reduction_of_interest_matching_accumulate] * self.p[TPY_Model_ratio1]
                     self.report[period][reduction_of_interest_matching_current] = self.report[period][reduction_of_interest_matching_current] * self.p[TPY_Model_ratio1]
 
+                    # 调整后的字段 乘以比例 TPY_Model_ratio1
                     for st in [interest_adjust_for_match_early_repay, pre_interest_adjust_for_match_early_repay]:
                         self.report[period][adjusted][st] = self.report[period][adjusted][st] * self.p[TPY_Model_ratio1]
 
-                #大地模式输出值修改
+                # 大地模式输出值修改
                 if self.get_is_include(self.p[lineid], config['FILTER2']):
                     if fair_value_guarantees not in self.report[period][adjusted].keys():
                         self.report[period][adjusted][fair_value_guarantees] = 0
                     if pre_fair_value_guarantees not in self.report[period][adjusted].keys():
                         self.report[period][adjusted][pre_fair_value_guarantees] = 0
 
+                    # 需要修改的调整后字段
                     for account in [premium_receivable_principal, cash_for_guarantee, guarantee,
                                     interest_adjust_for_guarantee, guarantee_liability_460, # impairment_loss1,pre_impairment_loss1,
-                                    pre_cash_for_guarantee,
-                                    pre_guarantee, pre_interest_adjust_for_guarantee,
-                                    fair_value_guarantees, pre_fair_value_guarantees, charge_income, pre_charge_income]:
+                                    pre_cash_for_guarantee, pre_guarantee, pre_interest_adjust_for_guarantee,
+                                    fair_value_guarantees, pre_fair_value_guarantees, charge_income, pre_charge_income,
+                                    premium_receivable_day1]:
+                        # 输出值 乘以 0.5
                         self.report[period][adjusted][account] = self.report[period][adjusted][account] * 0.5
 
+                    # 需要修改的调整后字段
                     for st in [cash_for_post_origination, post_origination, pre_cash_for_post_origination, pre_post_origination,
                                contract_assets_early_repay, cash_for_matching, match_early_repay, pre_cash_for_matching,
-                               pre_match_early_repay]:
+                               pre_match_early_repay, contract_assets_day1]:
+                        # 输出值 乘以比例 TPY_Model_ratio4
                         self.report[period][adjusted][st] = self.report[period][adjusted][st] * self.p[TPY_Model_ratio4]
 
+                    # 需要修改的字段
                     for st in [reduction_of_interest_guarantee_accumulate, reduction_of_interest_guarantee_current]:
-
+                        # 输出值 乘以 0.5
                         self.report[period][st] = self.report[period][st] * 0.5
 
-                    self.report[period][adjusted][premium_receivable_day1] = self.report[period][adjusted][premium_receivable_day1] * 0.5
-                    self.report[period][adjusted][contract_assets_day1] = self.report[period][adjusted][contract_assets_day1] * self.p[TPY_Model_ratio4]
+                    # 输出值 乘以比例 TPY_Model_ratio3
                     self.report[period][reduction_of_interest_matching_accumulate] = self.report[period][reduction_of_interest_matching_accumulate] * self.p[TPY_Model_ratio3]
                     self.report[period][reduction_of_interest_matching_current] = self.report[period][reduction_of_interest_matching_current] * self.p[TPY_Model_ratio3]
 
+                    # 调整后的字段 输出值乘以比例 TPY_Model_ratio3
                     for st in [interest_adjust_for_match_early_repay, pre_interest_adjust_for_match_early_repay]:
                         self.report[period][adjusted][st] = self.report[period][adjusted][st] * self.p[TPY_Model_ratio3]
 
@@ -1328,6 +1369,7 @@ class Revenue(Math):
             h3 记录创建人和时间
     '''
     def output_report_list(self, writer):
+        # h1 h2 h3 收入报表表头
         h1 = [putout_no, putout_date, loan_term, business_sum, itemname, ctype,
               guarantee_ratio, margin_ratio, loss_ratio,
               overdue_date, overdue_days, mob, finish_date, buy_date, date, adjust_status]
@@ -1451,45 +1493,39 @@ class DataEngine(object):
             print('Error: No such file basic_data!')
             exit(1)
         """初始化参数列表"""
+
+        # 通过静态方法给 类变量 future_loss 赋值
         self.future_loss = self.get_future_loss()
+        # 通过静态方法给 类变量 loss_ratio_margin 赋值
         self.loss_ratio_margin = self.get_lossratio_and_margin()
+        # 初始化数据列表
         self.param_list = []
 
+    # 从config.xls配置第二页中读取future_loss
     @staticmethod
     def get_future_loss():
         configPath = os.getcwd() + os.sep + 'config.xls'
         workbook = xlrd.open_workbook(configPath)
         worksheet = workbook.sheet_by_index(1)
-        rows = worksheet.nrows
-        cols = worksheet.ncols
+        rows = worksheet.nrows      # 获取工作表的行数
+        cols = worksheet.ncols      # 获取工作表的列数
 
-        future_loss = {}
+        future_loss = {}    # 初始化 future_loss 字典
+        # 遍历工作表的行数
         for r in range(1, rows):
-            quater = worksheet.cell_value(r, 2)
+            quater = worksheet.cell_value(r, 2)     # 获得季度
             future_loss[quater] = {}
+            # 季度开始日期
             future_loss[quater][start] = xlrd.xldate_as_datetime(worksheet.cell_value(r, 0), 0).strftime("%Y/%m/%d")
+            # 季度结束日期
             future_loss[quater][end] = xlrd.xldate_as_datetime(worksheet.cell_value(r, 1), 0).strftime("%Y/%m/%d")
             for c in range(3, cols):
                 month = c - 2
+                # 1-36个月的 future_loss 值
                 future_loss[quater][month] = worksheet.cell_value(r, c)
         return future_loss
 
-    # 读取annual_loss_ratio和annual_margin
-    @staticmethod
-    def get_lossratio_and_margin():
-        configPath = os.getcwd() + os.sep + 'config.xls'
-        excel = xlrd.open_workbook(configPath)
-        sheet = excel.sheet_by_index(3)
-        rows = sheet.nrows
-        dic = {}
-
-        for row in range(1, rows):
-            dic1 = {'loss_ratio': sheet.cell_value(row, 3)}
-            dic2 = {'margin': sheet.cell_value(row, 4)}
-            dic.setdefault(sheet.cell_value(row, 2), [dic1, dic2])
-        return dic
-
-    # 读取Implied price concession ratio表数据
+    # 从config.xls配置第三页中读取 Implied price concession ratio
     @staticmethod
     def get_IPCR():
         path = os.getcwd() + os.sep + 'config.xls'
@@ -1502,33 +1538,54 @@ class DataEngine(object):
             ipcr[row] = sheet.cell_value(row, 1)
         return ipcr
 
+    # 从config.xls配置第四页中读取 annual_loss_ratio 和 annual_margin
+    @staticmethod
+    def get_lossratio_and_margin():
+        configPath = os.getcwd() + os.sep + 'config.xls'
+        excel = xlrd.open_workbook(configPath)
+        sheet = excel.sheet_by_index(3)
+        rows = sheet.nrows
+        dic = {}
+
+        for row in range(1, rows):
+            dic1 = {'annual_loss_ratio': sheet.cell_value(row, 3)}      # 临时字典1存放 annual_loss_ratio
+            dic2 = {'annual_margin': sheet.cell_value(row, 4)}          # 临时字典2存放 annual_margin
+            dic.setdefault(sheet.cell_value(row, 2), [dic1, dic2])      # 每个季度作为键与相应的列表[dic1, dic2]作为值构建字典
+        return dic
+
     '''获取数据源，根据不同的类型进行数据接入'''
     def get_data(self):
-        param_list = []
         if self.type == "Excel":
             #读取excel的方式
             path = os.getcwd() + os.sep + 'basic_data.xlsx'
             excel = xlrd.open_workbook(path)
             sheet = excel.sheet_by_index(0)
-            row, col = sheet.nrows, sheet.ncols
+            row, col = sheet.nrows, sheet.ncols     # 获得 basic_data 数据表的行数和列数
 
+            # 遍历行数，对每一行的数据处理
             for r in range(1, row):
-                line = []
+                line = []   # 初始化临时变量，用来保存一行数据
+                # 遍历一行数据的列数
                 for c in range(0, col):
-                    if c == 5:  # 第四列日期进行转换
+                    if c == 5:  # 数据的第6列为日期格式，若是第6列需要转换以下格式，然后放到临时变量line中
                         line.append(xlrd.xldate_as_datetime(sheet.cell_value(r, c), 0))
                     else:
+                        # 如果不是第6列，则直接放到临时变量line中
                         line.append(sheet.cell_value(r, c))
+                # 内循环结束，line已经存放了一行的数据，将line添加到类变量 self.param_list 中
                 self.param_list.append(line)
 
         elif self.type == "Text":
             #读取文本方式
             path = os.getcwd() + os.sep + 'basic_data.txt'
             file = op(path, 'r', 'gbk')
-            rows = file.readlines()
+            rowsText = file.readlines()     # readlines读取全部行的内容
 
-            for row in rows:
+            # 逐行处理
+            for row in rowsText:
+                # 对每一行使用制表符进行切片，形成列表格式
                 data = row.split("\t")
+                # 如果不是第一行，就添加到类变量 self.param_list 中
                 if data[0] not in ['putout_no', '出账编号']:
                     self.param_list.append(data)
 
@@ -1536,11 +1593,12 @@ class DataEngine(object):
     '''获取业务参数修改历史'''
     @staticmethod
     def get_changelog():
+        # 读取config.xls配置表的第一页和第五页
         configPath = os.getcwd() + os.sep + 'config.xls'
         excel = xlrd.open_workbook(configPath)
-        busConfig = excel.sheet_by_index(0)
-        changeLog = excel.sheet_by_index(4)
-        count = changeLog.nrows
+        busConfig = excel.sheet_by_index(0)     # 第一页业务参数配置
+        changeLog = excel.sheet_by_index(4)     # 第五页参数修改历史
+        count = changeLog.nrows     # 获得第五页的行数
 
         '''
         参数字典，以列表方式存储
@@ -1552,30 +1610,35 @@ class DataEngine(object):
             TPY_model_ratio3
             TPY_model_ratio4
         '''
-        dicList = [{}, {}, {}, {}, {}, {}, {}]
+        dicList = [{}, {}, {}, {}, {}, {}, {}]      # 初始化业务参数列表
 
+        # 先对第五页做处理，遍历行数
         for i in range(1, count):
+            # 对第一列的日期格式做转换处理
             time = xlrd.xldate_as_datetime(changeLog.cell_value(i, 0), 0).strftime('%Y/%m/%d')
             time = datetime.datetime.strptime(time, '%Y/%m/%d')
-
+            # 遍历 2-8 列（分别为7个业务参数）
             for j in range(1, 8):
                 try:
                     if changeLog.cell_value(i, j) != '':
+                        # 若是参数有修改值，则以（日期：修改值）作为键值对存到参数列表
                         dicList[j-1][time] = changeLog.cell_value(i, j)
                 except:
                     pass
 
+        # 初始时间
         ever = '2015/01/01'
         ever = datetime.datetime.strptime(ever, '%Y/%m/%d')
         t = 0
-        for r in range(0, 11):
-            if r not in [3, 4, 5, 8]:
-                dicList[t][ever] = busConfig.cell_value(r, 1)
-                t += 1
+        # 对第一页做处理
+        for r in range(0, 7):
+            # 以（初始时间：业务参数值）作为键值对存到参数列表
+            dicList[t][ever] = busConfig.cell_value(r, 1)
+            t += 1
 
         return dicList
 
-    #统一日期格式
+    #统一日期格式 xxxx/xx/xx
     @staticmethod
     def date_format(param_date):
         if param_date == '' or param_date is None:
@@ -1598,37 +1661,47 @@ class DataEngine(object):
     #判断putout_date属于哪个季度
     @staticmethod
     def get_sornum(putout_date):
-        putoutDate = putout_date.split('/')
+        putoutDate = putout_date.split('/')     # 对传入的日期做切片处理，生成日期列表，格式为['xxxx', 'xx', 'xx']
 
-        if int(putoutDate[1]) <= 3:
-            sornum = putoutDate[0] + 'Q1'
+        if int(putoutDate[1]) <= 3:             # 若列表的第二个值即月份小于等于3，则为第一个季度
+            sornum = putoutDate[0] + 'Q1'       # 季度 = 年份 + 'Q1'
 
         elif int(putoutDate[1]) <= 6:
-            sornum = putoutDate[0] + 'Q2'
+            sornum = putoutDate[0] + 'Q2'       # 季度 = 年份 + 'Q2'
 
         elif int(putoutDate[1]) <= 9:
-            sornum = putoutDate[0] + 'Q3'
+            sornum = putoutDate[0] + 'Q3'       # 季度 = 年份 + 'Q3'
 
         else:
-            sornum = putoutDate[0] + 'Q4'
+            sornum = putoutDate[0] + 'Q4'       # 季度 = 年份 + 'Q4'
         return sornum
 
-    # 计算guarantee_ratio和fulltime_margin
+    # 计算 guarantee_ratio 和 fulltime_margin
     def get_guarantee_and_margin(self, sornum, loan_term):
-        loss_and_margin = self.loss_ratio_margin[sornum]
-        loss, margin = loss_and_margin[0], loss_and_margin[1]
-        fulltime_margin = margin['margin'] * 1.67 * (loan_term / 36)
-        guarantee_ratio = loss['loss_ratio'] * 1.67 * (loan_term / 36) * 0.93 + fulltime_margin
+        # 传入参数为季度和借款期限
+        loss_and_margin = self.loss_ratio_margin[sornum]    #根据相应的季度从类变量 self.loss_ratio_margin 中得到 annual_loss 和 anual_margin 的值
+        loss, margin = loss_and_margin[0], loss_and_margin[1]   # 将值分别赋给 loss 和 margin
 
-        return guarantee_ratio, fulltime_margin
+        # fulltime_margin = annual_margin * 1.67 * (借款期限 / 36)
+        fulltime_margin = margin['annual_margin'] * 1.67 * (loan_term / 36)
+
+        # 普通机构 guarantee_ratio = annual_loss_ratio * 1.67 * (借款期限 / 36) * 0.93 + fulltime_margin
+        guarantee_ratio = loss['annual_loss_ratio'] * 1.67 * (loan_term / 36) * 0.93 + fulltime_margin
+        # 太保模式 guarantee_ratio_taibao = annual_loss_ratio * 1.67 * 1.04 * 0.93
+        guarantee_ratio_taibao = loss['annual_loss_ratio'] * 1.67 * 1.04 * 0.93
+
+        return guarantee_ratio, guarantee_ratio_taibao, fulltime_margin
 
     '''根据进程序号分配参数列表'''
     def assign_param_list(self, num):
-        assign_param = {}
+        assign_param = {}   # 初始化进程参数字典
         n = 1
+        # 构建进程参数字典，其格式为 assign_param = {1: [参数列表], 2: [参数列表], 3: [参数列表], 4: [参数列表]}
         for i in range(1, num + 1):
             assign_param[i] = []
+        # 遍历类变量 self.param_list 参数列表
         for param in self.param_list:
+            # 将每一条数据分配给 assign_param[进程号][参数列表]
             assign_param[n].append(param)
             n = n + 1
             if n == num + 1:
@@ -1640,28 +1713,35 @@ class DataEngine(object):
 
     '''装入参数'''
     def input_param(self, param_list):
+        # 赋值给类变量
         self.param_list = param_list
 
     '''配置业务参数'''
     @staticmethod
     def readConfig():
+        # 全局变量 config 仅包括了系统配置，需要将业务参数配置添加到config中
         configPath = os.getcwd() + os.sep + 'config.xls'
         if not os.path.exists(configPath):
             print('File config.xls does not exist!')
             exit(1)
         excel = xlrd.open_workbook(configPath)
         sheet = excel.sheet_by_index(0)
-        rows = sheet.nrows
+        rows = sheet.nrows  # 获得第一页的行数
 
+        # 遍历行数
         for row in range(0, rows):
-            if sheet.cell_value(row, 0) == 'FILTER1' or sheet.cell_value(row, 0) == 'CANCEL' or sheet.cell_value(row,
-                                                                                                                 0) == 'FILTER2':
-                li = sheet.cell_value(row, 1).split(',')
-                config[sheet.cell_value(row, 0)] = li
+            # 若为 FILTER1，FILTER2， CANCEL 机构代码，则做如下处理
+            if sheet.cell_value(row, 0) == 'FILTER1' or sheet.cell_value(row, 0) == 'CANCEL' or sheet.cell_value(row, 0) == 'FILTER2':
+                li = sheet.cell_value(row, 1).split(',')    # 对机构代码以','切分，形成列表 ['机构代码', '机构代码', '机构代码']
+                config[sheet.cell_value(row, 0)] = li       # 放到全局变量字典中
+
+            # 若为 SERVER 机构代码，则做如下入理
             elif sheet.cell_value(row, 0) == 'SERVER':
-                listd = sheet.cell_value(row, 1).split(',')
-                dic = {}
+                listd = sheet.cell_value(row, 1).split(',')     # 以','切分
+                dic = {}    # 临时变量
+                # 遍历 listd 列表
                 for ld in listd:
+                    # 对 listd 列表中的每一项都转换成字典形式，放到 dic 中
                     ld = ld.split(':')
                     dic[ld[0]] = int(ld[1])
                 config[sheet.cell_value(row, 0)] = dic
@@ -1701,6 +1781,8 @@ class DataEngine(object):
             if param[7] == '':
                 continue
             #清洗字段，统一日期格式 %Y/%m/%d
+            if len(param) == 16:
+                del param[11:13]
             param[-1] = param[-1].replace('\r\n', '')
             for i in [5, 11, 12, 13]:
                 param[i] = self.date_format(str(param[i]))
@@ -1708,56 +1790,27 @@ class DataEngine(object):
             #损失率计算
             sornum = self.get_sornum(param[5])
             param[3] = float(param[3])
-            tuple_ratio = self.get_guarantee_and_margin(sornum, int(param[3]))
+
+            tuple_ratio = self.get_guarantee_and_margin(sornum, int(param[3]))      # 获得(guarantee_ratio, guarantee_ratio_taibao, fulltime_margin)
+            # 将这三个参数放到 param 末尾
             param.append(tuple_ratio[0])
             param.append(tuple_ratio[1])
+            param.append(tuple_ratio[2])
 
             #对每一笔贷款进行计算
-            revenue = Revenue(config, param, period, future_loss, changeList, ipcr)
-            revenue.calculation_program(schedule_writer, report_writer)
+            revenue = Revenue(config, param, period, future_loss, changeList, ipcr)     # 传入参数，实例化类 Revenue
+            revenue.calculation_program(schedule_writer, report_writer)                 # 调用类方法，报表计算主函数
 
             #程序运行时间相关
             n += 1
-            secends = time.process_time()
-            percent = str(round((n / param_num) * 100, 2)) + '%'
             print('Task[{0}] Runing：{1}'.format(process_num, param))
-            times = str(int(secends / 60)) + ' minutes ' + str(int(secends % 60)) + ' secends'
-            avg_cost = round(secends / n, 1)
+            secends = time.process_time()  # 循环一次程序运行时间
+            percent = str(round((n / param_num) * 100, 2)) + '%'  # 已经计算结束占全部的百分比
+            times = str(int(secends / 60)) + ' minutes ' + str(int(secends % 60)) + ' secends'  # 已经花费的时间
+            avg_cost = round(secends / n, 1)    # 平均花费的时间
             ex_cost = round(avg_cost * (param_num-n), 1)
-            ex_time = str(int(ex_cost / 60)) + ' minutes ' + str(int(ex_cost % 60)) + ' secends'
+            ex_time = str(int(ex_cost / 60)) + ' minutes ' + str(int(ex_cost % 60)) + ' secends'    # 预计还要花费的时间
             print('Percent：{0} | Usedtime：{1} | Will take：{2}'.format(percent, times, ex_time))
-
-################################################主界面区#################################################################
-
-'''
-    主界面程序
-'''
-class MainWindow(QWidget):
-
-    def __init__(self):
-        super().__init__()
-        self.initUI()
-
-    '''主界面函数'''
-    def initUI(self):
-        self.setGeometry(200, 200, 1000, 800)
-        self.setWindowTitle('DSF跑数工具')
-        self.setWindowIcon(QIcon('gaap.png'))
-
-        
-        '''主程序区'''
-        group1 = QGroupBox('主程序区', self)
-        group1.setGeometry(20, 20, 760, 180)
-
-        label0 = QLabel('选择计算区间：', self)
-        label0.move(50, 50)
-        label1 = QLabel('开始时间：', self)
-        label1.move(50, 100)
-
-
-
-        self.show()
-
 
 ################################################主程序区#################################################################
 
@@ -1851,11 +1904,8 @@ def multi_task(period, num):
 
 if __name__ == '__main__':
     #设置计算日期
-    # PERIOD = set_period(['2019-01'])
-    # if config['PROCESS'] == 1:
-    #     single_task(PERIOD, 1)
-    # else:
-    #     multi_task(PERIOD, config['PROCESS'])
-    app = QApplication(sys.argv)
-    mw = MainWindow()
-    sys.exit(app.exec_())
+    PERIOD = set_period(['2014-12-2018-12'])
+    if config['PROCESS'] == 1:
+        single_task(PERIOD, 1)
+    else:
+        multi_task(PERIOD, config['PROCESS'])
