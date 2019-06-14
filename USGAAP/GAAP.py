@@ -466,15 +466,17 @@ class Revenue(Math):
         else:
             #如果为0，则管理费率1为0
             self.p[management_rate1] = 0
+
         self.p[management_rate] = self.p[management_rate2] = float(param[10]) / 100         #管理费率2，显示出来
 
         #判断机构id是否是太保模式，若机构是太保模式，担保比例使用guarantee_ratio_taibao
         if self.get_is_include(self.p[lineid], config['FILTER1']):
-            self.p[guarantee_ratio] = round(float(param[-2]), 6)                                #担保比例
+            self.p[guarantee_ratio] = round(float(param[-3]), 6)                                #担保比例
+            self.p[margin_ratio] = float(param[-1])
         else:
-            self.p[guarantee_ratio] = round(float(param[-3]), 6)
+            self.p[guarantee_ratio] = round(float(param[-4]), 6)
+            self.p[margin_ratio] = float(param[-2])
 
-        self.p[margin_ratio] = float(param[-1])                                             #全周期利润率
 
         #loss_ratio = guarantee_ratio - margin
         self.p[loss_ratio] = self.subtract_value(self.p[guarantee_ratio], self.p[margin_ratio])
@@ -877,6 +879,7 @@ class Revenue(Math):
             if self.date_sub(self.p[buy_date], self.p[end]) <= 0:
                 return compensatory, self.p[buy_date]
         if self.p[finish_date] != '':
+
             if self.date_sub(self.p[finish_date], self.p[end]) <= 0:
                 return repayment, self.p[finish_date]
         if self.p[overdue_date] != '':
@@ -1476,6 +1479,7 @@ class Revenue(Math):
                 # global config
                 """每个文件表头字段只输出一次"""
                 config['HEADER'] = 0
+
 ################################################数据执行#################################################################
 
 class DataEngine(object):
@@ -1585,6 +1589,7 @@ class DataEngine(object):
             for row in rowsText:
                 # 对每一行使用制表符进行切片，形成列表格式
                 data = row.split("\t")
+                data[-1] = data[-1].replace('\r\n', '')
                 # 如果不是第一行，就添加到类变量 self.param_list 中
                 if data[0] not in ['putout_no', '出账编号']:
                     self.param_list.append(data)
@@ -1685,12 +1690,13 @@ class DataEngine(object):
         # fulltime_margin = annual_margin * 1.67 * (借款期限 / 36)
         fulltime_margin = margin['annual_margin'] * 1.67 * (loan_term / 36)
 
+        fulltime_margin_taibao = margin['annual_margin'] * 1.67 * (loan_term / 36) * 2/3
         # 普通机构 guarantee_ratio = annual_loss_ratio * 1.67 * (借款期限 / 36) * 0.93 + fulltime_margin
         guarantee_ratio = loss['annual_loss_ratio'] * 1.67 * (loan_term / 36) * 0.93 + fulltime_margin
         # 太保模式 guarantee_ratio_taibao = annual_loss_ratio * 1.67 * 1.04 * 0.93
-        guarantee_ratio_taibao = loss['annual_loss_ratio'] * 1.67 * 1.04 * 0.93
+        guarantee_ratio_taibao = loss['annual_loss_ratio'] * 1.67 * (loan_term / 36) * 0.93 + fulltime_margin_taibao
 
-        return guarantee_ratio, guarantee_ratio_taibao, fulltime_margin
+        return guarantee_ratio, guarantee_ratio_taibao, fulltime_margin, fulltime_margin_taibao
 
     '''根据进程序号分配参数列表'''
     def assign_param_list(self, num):
@@ -1778,13 +1784,19 @@ class DataEngine(object):
 
         '''循环每一笔贷款的参数'''
         for param in self.param_list:
-            if param[7] == '':
+            if param[7] == '' and param[8] == '' and param[9] == '' and param[10] == '':
+                param_num -= 1
                 continue
+            if param[7] == '':
+                param[7] = 0
             #清洗字段，统一日期格式 %Y/%m/%d
             if len(param) == 16:
                 del param[11:13]
-            param[-1] = param[-1].replace('\r\n', '')
+
             for i in [5, 11, 12, 13]:
+                if type(param[i]) == float:
+                    param[i] = xlrd.xldate_as_datetime(param[i], 0).strftime('%Y/%m/%d')
+
                 param[i] = self.date_format(str(param[i]))
 
             #损失率计算
@@ -1796,6 +1808,7 @@ class DataEngine(object):
             param.append(tuple_ratio[0])
             param.append(tuple_ratio[1])
             param.append(tuple_ratio[2])
+            param.append(tuple_ratio[3])
 
             #对每一笔贷款进行计算
             revenue = Revenue(config, param, period, future_loss, changeList, ipcr)     # 传入参数，实例化类 Revenue
@@ -1904,7 +1917,7 @@ def multi_task(period, num):
 
 if __name__ == '__main__':
     #设置计算日期
-    PERIOD = set_period(['2014-12-2018-12'])
+    PERIOD = set_period(['2018-01-2018-12'])
     if config['PROCESS'] == 1:
         single_task(PERIOD, 1)
     else:
